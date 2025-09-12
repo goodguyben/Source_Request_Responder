@@ -86,6 +86,11 @@ GMAIL_TOKEN_FILE = os.getenv("GMAIL_TOKEN_FILE", "token.json")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
+# Draft generation provider configuration
+DRAFT_LLM_PROVIDER = os.getenv("DRAFT_LLM_PROVIDER", "gemini").lower()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+GPT5_MODEL = os.getenv("GPT5_MODEL", "gpt-5")
+
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = int(os.getenv("TELEGRAM_CHAT_ID", "0") or "0")
 
@@ -800,7 +805,7 @@ def upsert_request(parsed: ParsedRequest) -> int:
 
 
 # ------------------------------
-# Gemini Draft Generation
+# Draft Generation (Gemini or GPT-5)
 # ------------------------------
 
 
@@ -1124,14 +1129,257 @@ def generate_draft_with_gemini(parsed: ParsedRequest) -> Tuple[str, str]:
     return subj.strip(), body.strip()
 
 
-def save_draft(request_id: int, subject: str, body: str) -> int:
+@retry(reraise=True, stop=stop_after_attempt(4), wait=wait_exponential(min=2, max=20))
+def generate_draft_with_gpt5(parsed: ParsedRequest) -> Tuple[str, str]:
+    if not OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY is not set")
+    # Import locally to avoid hard dependency when not using GPT-5
+    try:
+        from openai import OpenAI  # type: ignore
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError("openai package is not installed. Please install 'openai'.") from exc
+
+    client = OpenAI(api_key=OPENAI_API_KEY)
+
+    template = load_prompt_template()
+    prompt = interpolate_template(
+        template,
+        {
+            "subject": parsed.subject,
+            "sender": parsed.sender,
+            "sender_email": parsed.sender_email,
+            "deadline": parsed.deadline or "",
+            "requirements": parsed.requirements or "",
+            "query_text": parsed.query_text,
+        },
+    )
+
+    logger.info("Generating draft with GPT-5 model=%s", GPT5_MODEL)
+    # Use Chat Completions for broad compatibility
+    try:
+        resp = client.chat.completions.create(
+            model=GPT5_MODEL,
+            messages=[
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.7,
+        )
+        text = (resp.choices[0].message.content or "").strip()
+    except Exception as e:
+        # Fallback to Responses API if available in environment
+        try:
+            resp2 = client.responses.create(model=GPT5_MODEL, input=prompt)
+            # New Responses API returns output in a different structure
+            text = (getattr(resp2, "output_text", None) or getattr(resp2, "content", "") or "").strip()
+        except Exception:
+            raise
+
+    subj = "Re: " + parsed.subject
+    body = text
+    try:
+        cleaned = text.strip()
+        if cleaned.startswith("```"):
+            cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+            cleaned = re.sub(r"\s*```$", "", cleaned)
+        data = json.loads(cleaned)
+        subj = data.get("subject") or subj
+        body = data.get("body") or body
+    except Exception:
+        pass
+
+    # Ensure greeting personalization and required signature (reuse same post-processing as Gemini)
+    first_name = (parsed.requester_name or "").split()[0] if (parsed.requester_name or "").strip() else None
+    if first_name:
+        greeting_options = [f"Hello {first_name}!", f"Hi {first_name},"]
+        greeting = random.choice(greeting_options)
+    else:
+        greeting_options = ["Hello!", "Hi there!"]
+        greeting = random.choice(greeting_options)
+
+    def _humanize(text: str) -> str:
+        original = text
+        replacements = {
+            r"\bIn today's (?:fast-paced|ever[- ]changing) world\b": "",
+            r"\bIt's no secret that\b": "",
+            r"\bAt the end of the day\b": "",
+            r"\bUltimately,\b": "",
+            r"\bIn conclusion,\b": "",
+            r"\bAdditionally,\b": "",
+            r"\bMoreover,\b": "",
+            r"\bOn the other hand,\b": "",
+            r"\bIt is important to note that\b": "",
+        }
+        for pat, rep in replacements.items():
+            text = re.sub(pat, rep, text, flags=re.IGNORECASE)
+        exuberant = [
+            "incredible",
+            "transformative",
+            "exciting",
+            "revolutionary",
+            "game-changing",
+            "unprecedented",
+            "amazing",
+            "remarkable",
+            "cutting-edge",
+        ]
+        for w in exuberant:
+            text = re.sub(rf"(?<![\"'])\b{w}\b(?![\"'])", "strong", text, flags=re.IGNORECASE)
+        big_brands = ["Tesla", "Apple", "Google", "Amazon", "Microsoft"]
+        for b in big_brands:
+            if b.lower() not in (parsed.query_text or "").lower():
+                text = re.sub(rf"\b{re.escape(b)}\b", "a well-known player", text)
+        sentences = re.split(r"(?<=[.!?])\s+", text)
+        dedup: list[str] = []
+        seen = set()
+        for s in sentences:
+            key = re.sub(r"\W+", " ", s.strip().lower())
+            key = " ".join(key.split())
+            if len(key) > 0 and key not in seen:
+                dedup.append(s)
+                seen.add(key)
+        if len(dedup) >= 2:
+            text = " ".join(dedup)
+        if text.count("—") > 1:
+            text = text.replace("—", "—", 1)
+            text = text.replace("—", ",")
+        lines = text.splitlines()
+        in_bullets = False
+        bullets: list[str] = []
+        start_idx = -1
+        for i, ln in enumerate(lines):
+            if re.match(r"^\s*[-*] ", ln):
+                if not in_bullets:
+                    in_bullets = True
+                    start_idx = i
+                bullets.append(ln)
+            else:
+                if in_bullets:
+                    processed = bullets[:]
+                    if len(processed) > 4:
+                        processed = processed[:3]
+                    if processed:
+                        processed[0] = re.sub(r"\.?$", ".", processed[0])
+                    if len(processed) >= 2:
+                        processed[1] = re.sub(r"\.?$", "…", processed[1])
+                    lines[start_idx:i] = processed
+                    bullets = []
+                    in_bullets = False
+        if in_bullets:
+            processed = bullets[:]
+            if len(processed) > 4:
+                processed = processed[:3]
+            if processed:
+                processed[0] = re.sub(r"\.?$", ".", processed[0])
+            if len(processed) >= 2:
+                processed[1] = re.sub(r"\.?$", "…", processed[1])
+            lines[start_idx:] = processed
+        text = "\n".join(lines)
+        text = re.sub(r"\bdo not\b", "don't", text, flags=re.IGNORECASE)
+        text = re.sub(r"\bis not\b", "isn't", text, flags=re.IGNORECASE)
+        text = re.sub(r"\bwe are\b", "we're", text, flags=re.IGNORECASE)
+        text = re.sub(r"\bit is\b", "it's", text, flags=re.IGNORECASE)
+        sentences = re.split(r"(?<=[.!?])\s+", text)
+        if 2 <= len(sentences) <= 8:
+            avg = sum(len(s) for s in sentences) / max(1, len(sentences))
+            if all(10 < len(s) < 220 for s in sentences) and avg > 80:
+                sentences.insert(1, "Quick take: here’s the gist.")
+                text = " ".join(s.strip() for s in sentences)
+        text = re.sub(r"\n*(In conclusion|Ultimately)[^\n]*$", "", text, flags=re.IGNORECASE)
+        return text.strip() or original
+
+    body = _humanize(body)
+
+    def _strip_llm_greeting(text: str) -> str:
+        t = text.lstrip()
+        for _ in range(2):
+            m = re.match(r"^(?:hi|hello|hey|dear|greetings)[^\n]*\n+", t, flags=re.IGNORECASE)
+            if not m:
+                break
+            t = t[m.end():]
+        return t.lstrip()
+
+    def _strip_llm_signature(text: str) -> str:
+        t = text.rstrip()
+        signoff = re.search(r"\n\s*(best regards|regards|sincerely|thanks|thank you)[^\n]*$", t, flags=re.IGNORECASE)
+        if signoff:
+            t = t[: signoff.start()].rstrip()
+        tail = t.splitlines()
+        drop_idx = None
+        for i in range(len(tail) - 1, max(-1, len(tail) - 6), -1):
+            ln = tail[i]
+            if re.search(r"@|\+\d|mavericksedge|founder|bezal", ln, flags=re.IGNORECASE):
+                drop_idx = i
+        if drop_idx is not None:
+            t = "\n".join(tail[:drop_idx]).rstrip()
+        return t
+
+    def _remove_markdown_and_bullets(text: str) -> str:
+        t = re.sub(r"(\*\*|__)(.*?)\\1", r"\\2", text)
+        t = re.sub(r"(\*|_)(.*?)\\1", r"\\2", t)
+        lines = []
+        for ln in t.splitlines():
+            ln2 = re.sub(r"^\s*([\-*•]|\d+\.)\s+", "", ln)
+            lines.append(ln2)
+        t = "\n".join(lines)
+        t = re.sub(r"\n\s*\n+", "\n\n", t)
+        return t.strip()
+
+    def _limit_to_two_paragraphs(text: str) -> str:
+        paras = [p.strip() for p in re.split(r"\n\n+", text) if p.strip()]
+        if not paras:
+            return text.strip()
+        if len(paras) == 1:
+            sentences = re.split(r"(?<=[.!?])\s+", paras[0])
+            if len(sentences) >= 2:
+                cut = max(1, len(sentences) // 2)
+                first = " ".join(sentences[:cut]).strip()
+                second = " ".join(sentences[cut:]).strip()
+                return (first + "\n\n" + second).strip()
+            return paras[0]
+        if len(paras) == 2:
+            return "\n\n".join(paras)
+        merged_second = paras[1] + " " + " ".join(paras[2:])
+        return paras[0] + "\n\n" + re.sub(r"\s+", " ", merged_second).strip()
+
+    body = _strip_llm_greeting(body)
+    body = _strip_llm_signature(body)
+    body = _remove_markdown_and_bullets(body)
+    body = _limit_to_two_paragraphs(body)
+
+    body = f"{greeting}\n\n{body}".strip()
+    if not re.search(r"\n\s*Best regards,\s*$", body, flags=re.IGNORECASE):
+        body = body.rstrip() + "\n\nBest regards,"
+    signature = (
+        "\n\nBezal John Benny\n"
+        "Founder | Mavericks Edge — https://mavericksedge.ca/\n"
+        "bezal.benny@mavericksedge.ca\n"
+        "C: +1 (250) 883-8849"
+    )
+    if signature.strip() not in body:
+        body = body.rstrip() + signature
+
+    return subj.strip(), body.strip()
+
+
+def generate_draft(parsed: ParsedRequest) -> Tuple[str, str, str]:
+    """Route draft generation to the configured provider and return (subject, body, model_used)."""
+    provider = (DRAFT_LLM_PROVIDER or "gemini").lower()
+    if provider == "gpt5":
+        subj, body = generate_draft_with_gpt5(parsed)
+        return subj, body, GPT5_MODEL
+    # default: gemini
+    subj, body = generate_draft_with_gemini(parsed)
+    return subj, body, GEMINI_MODEL
+
+
+def save_draft(request_id: int, subject: str, body: str, model_used: str) -> int:
     now = dt.datetime.utcnow().isoformat()
     db_execute(
         """
         INSERT INTO drafts (request_id, subject, body, model, approved, created_at, updated_at)
         VALUES (?, ?, ?, ?, 0, ?, ?)
         """,
-        (request_id, subject, body, GEMINI_MODEL, now, now),
+        (request_id, subject, body, model_used, now, now),
     )
     row = db_query_one("SELECT last_insert_rowid() AS id")
     draft_id = int(row["id"])  # type: ignore[index]
@@ -1510,8 +1758,8 @@ async def poll_gmail_and_process(app) -> None:
                     request_id = upsert_request(parsed)
                     log_action(request_id, "request_parsed", parsed.subject)
                     # Generate draft
-                    subject, body = await asyncio.to_thread(generate_draft_with_gemini, parsed)
-                    save_draft(request_id, subject, body)
+                    subject, body, model_used = await asyncio.to_thread(generate_draft, parsed)
+                    save_draft(request_id, subject, body, model_used)
                     # Send to Telegram for review
                     await telegram_send_review(app, parsed, request_id, subject, body)
                 
