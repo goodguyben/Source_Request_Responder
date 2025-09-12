@@ -23,9 +23,9 @@ import datetime as dt
 import email
 import email.policy
 import json
+import random
 import logging
 import os
-import random
 import re
 import signal
 import sqlite3
