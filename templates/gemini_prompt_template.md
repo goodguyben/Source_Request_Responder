@@ -25,18 +25,19 @@ Input:
 Task:
 - Draft a concise, credible response that demonstrates expertise and relevance.
 - Include a compelling subject line tailored to the query.
-- Use a polite, professional tone with skimmable structure (short paragraphs; no bullets or bold).
+- Use a casual, humble, polite, friendly, conversational tone (as if speaking to a colleague) while remaining professional. Keep skimmable structure (short paragraphs; no bullets or bold).
 - Provide 2-4 specific, insightful points tightly tied to the query.
 - Proof: include one proof point (metric, brief case note) tied to Mavericks Edge/Bezal when relevant.
 - Plain text: no attachments; max one link only if essential.
 - Close with a direct follow-up invitation (email only).
-- Keep body to ~150-250 words unless complexity requires more. No more than 2 paragraphs.
+- Keep body to ~150-250 words unless complexity requires more. Exactly 2 paragraphs.
 - Keep JSON schema strict: subject, body (no extra keys).
 - Stay within anti-AI style rules (already defined below).
 
 Hard constraints (do not violate):
 - Do NOT include a salutation or sign-off/signature; those are inserted by the system.
 - Do NOT use markdown formatting (no **bold**, lists, or headers). Plain text only.
+- Body must be exactly 2 paragraphs.
 
 Style constraints (avoid AI telltales):
 - Vary sentence length; include at least one short punchy line.
@@ -44,7 +45,6 @@ Style constraints (avoid AI telltales):
 - No formulaic openers (e.g., "In today's fast-paced world", "It's no secret that").
 - Minimize hedging: avoid phrases like "it's important to note", "in many ways", "often" at sentence starts.
 - Use natural transitions; avoid "Additionally", "Moreover", "On the other hand" at sentence starts.
-- Keep bullets uneven (2–4 items max) and concise; no subheadings.
 - Prefer contractions (it's, we're, don't) where natural.
 - Avoid predictable closers (no "In conclusion"/"Ultimately"). End plainly.
 - Avoid over-enthusiastic adjectives (e.g., incredible, transformative, exciting) unless directly quoted.

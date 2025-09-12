@@ -841,18 +841,19 @@ def load_prompt_template() -> str:
         Task:
         - Draft a concise, credible response that demonstrates expertise and relevance.
         - Include a compelling subject line tailored to the query.
-        - Use a polite, professional tone with quick skimmable structure (short paragraphs; no bullets or bold).
+        - Use a casual, humble, polite, friendly, conversational tone (as if speaking to a colleague) while remaining professional. Keep skimmable structure (short paragraphs; no bullets or bold).
         - Provide 2-4 specific, insightful points tied to the query.
         - Proof: include one proof point (metric, brief case note) tied to Mavericks Edge/Bezal when relevant.
         - Plain text: no attachments; max one link only if essential.
         - Close with a direct follow-up invitation (email only).
-        - Keep to 150-250 words in the body unless complexity requires more. No more than 2 paragraphs.
+        - Keep to 150-250 words in the body unless complexity requires more. Exactly 2 paragraphs.
         - Keep JSON schema strict: subject, body (no extra keys).
         - Stay within anti-AI style rules (already defined below).
 
         Hard constraints (do not violate):
         - Do NOT include a salutation or sign-off/signature; those are inserted by the system.
         - Do NOT use markdown formatting (no **bold**, lists, or headers). Plain text only.
+        - Body must be exactly 2 paragraphs.
 
         Style constraints (avoid AI telltales):
         - Vary sentence length; include at least one short punchy line.
@@ -1083,9 +1084,18 @@ def generate_draft_with_gemini(parsed: ParsedRequest) -> Tuple[str, str]:
         paras = [p.strip() for p in re.split(r"\n\n+", text) if p.strip()]
         if not paras:
             return text.strip()
-        if len(paras) <= 2:
+        # Ensure exactly two paragraphs. If one, split roughly in half by sentence boundary.
+        if len(paras) == 1:
+            sentences = re.split(r"(?<=[.!?])\s+", paras[0])
+            if len(sentences) >= 2:
+                cut = max(1, len(sentences) // 2)
+                first = " ".join(sentences[:cut]).strip()
+                second = " ".join(sentences[cut:]).strip()
+                return (first + "\n\n" + second).strip()
+            return paras[0]
+        if len(paras) == 2:
             return "\n\n".join(paras)
-        # Keep first two; squash the rest into the second
+        # If more than 2, keep first; merge the rest into the second, normalize spaces
         merged_second = paras[1] + " " + " ".join(paras[2:])
         return paras[0] + "\n\n" + re.sub(r"\s+", " ", merged_second).strip()
 
@@ -1139,7 +1149,37 @@ def save_draft(request_id: int, subject: str, body: str) -> int:
 
 
 def build_review_message_text(parsed: ParsedRequest, subject: str, body: str) -> str:
-    # Enhanced header with more context
+    # Secondary message content: AI analysis (trimmed) + Proposed draft
+
+    # Add Gemini analysis info if available (trim to 2 sentences)
+    gemini_info = ""
+    if USE_GEMINI_FILTERING and hasattr(parsed, 'gemini_analysis'):
+        analysis = parsed.gemini_analysis
+        reasoning = analysis['reasoning']
+        # Keep only first two sentences and <= 30 words
+        parts = re.split(r"(?<=[.!?])\s+", reasoning)
+        trimmed = " ".join(parts[:2]).strip()
+        words = trimmed.split()
+        if len(words) > 30:
+            trimmed = " ".join(words[:30]).rstrip() + "…"
+        gemini_info = (
+            f"🧠 AI Analysis: {trimmed}\n"
+            f"📊 Relevance Score: {analysis['relevance_score']:.2f}\n"
+            f"🎯 Topics: {', '.join(analysis['matching_topics'])}\n\n"
+        )
+
+    draft = f"Proposed Subject:\n{subject}\n\nProposed Body:\n{body}"
+    text = gemini_info + draft
+
+    # Telegram max length constraint handling
+    if len(text) <= MAX_TELEGRAM_MESSAGE_CHARS:
+        return text
+    truncated = text[: MAX_TELEGRAM_MESSAGE_CHARS - 100] + "\n\n…[truncated]"
+    return truncated
+
+
+def build_query_only_message_text(parsed: ParsedRequest) -> str:
+    """Primary message: header + full query text to guarantee visibility."""
     provider_info = f"Provider: {parsed.provider}\n" if parsed.provider else ""
     name_info = f"Name: {parsed.requester_name}\n" if parsed.requester_name else ""
     category_info = f"Category: {parsed.category}\n" if parsed.category else ""
@@ -1150,32 +1190,7 @@ def build_review_message_text(parsed: ParsedRequest, subject: str, body: str) ->
         f"{provider_info}{name_info}{category_info}{media_info}From: {parsed.sender} <{parsed.sender_email}>\n"
         f"{reply_to_info}Deadline: {parsed.deadline or 'n/a'}\n\n"
     )
-
-    # Show full query text (not just summary), as requested
-    query_section = f"Query:\n{parsed.query_text}\n\n"
-
-    # Add Gemini analysis info if available (trim to 2 sentences)
-    gemini_info = ""
-    if USE_GEMINI_FILTERING and hasattr(parsed, 'gemini_analysis'):
-        analysis = parsed.gemini_analysis
-        reasoning = analysis['reasoning']
-        # Keep only first two sentences
-        parts = re.split(r"(?<=[.!?])\s+", reasoning)
-        trimmed = " ".join(parts[:2]).strip()
-        gemini_info = (
-            f"🧠 AI Analysis: {trimmed}\n"
-            f"📊 Relevance Score: {analysis['relevance_score']:.2f}\n"
-            f"🎯 Topics: {', '.join(analysis['matching_topics'])}\n\n"
-        )
-
-    draft = f"Proposed Subject:\n{subject}\n\nProposed Body:\n{body}"
-    text = header + query_section + gemini_info + draft
-
-    # Telegram max length constraint handling
-    if len(text) <= MAX_TELEGRAM_MESSAGE_CHARS:
-        return text
-    truncated = text[: MAX_TELEGRAM_MESSAGE_CHARS - 100] + "\n\n…[truncated]"
-    return truncated
+    return header + f"Query:\n{parsed.query_text}"
 
 
 def review_keyboard(request_id: int) -> InlineKeyboardMarkup:
@@ -1189,11 +1204,19 @@ async def telegram_send_review(
     app, parsed: ParsedRequest, request_id: int, subject: str, body: str
 ) -> Optional[int]:
     try:
-        text = build_review_message_text(parsed, subject, body)
+        # 1) Send full query first to guarantee visibility
+        query_text = build_query_only_message_text(parsed)
+        sent_query = await app.bot.send_message(
+            chat_id=TELEGRAM_CHAT_ID,
+            text=query_text,
+        )
+        # 2) Send analysis + proposed draft with inline keyboard
+        text2 = build_review_message_text(parsed, subject, body)
         sent = await app.bot.send_message(
             chat_id=TELEGRAM_CHAT_ID,
-            text=text,
+            text=text2,
             reply_markup=review_keyboard(request_id),
+            reply_to_message_id=sent_query.message_id,
         )
         db_execute(
             "INSERT INTO telegram_messages (request_id, chat_id, message_id, created_at) VALUES (?, ?, ?, ?)",
