@@ -28,7 +28,7 @@ Task:
 - Use a polite, professional tone with skimmable structure (short paragraphs, bullets).
 - Provide 2-4 specific, insightful points tightly tied to the query.
 - Add 1-2 proof points (metrics, brief creds, case study references) where appropriate.
-- Offer availability for a short call or follow-up.
+- Offer availability for follow-up.
 - Keep body to ~150-250 words unless complexity requires more.
 
 Style constraints (avoid AI telltales):

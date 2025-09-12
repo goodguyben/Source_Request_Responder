@@ -843,7 +843,7 @@ def load_prompt_template() -> str:
         - Use a polite, professional tone with quick skimmable structure.
         - Provide 2-4 specific, insightful points tied to the query.
         - Add 1-2 proof points (metrics, brief creds, case study references) where appropriate.
-        - Offer availability for a short call or follow-up.
+        - Offer availability for follow-up.
         - Keep to 150-250 words in the body unless complexity requires more.
 
         Style constraints (avoid AI telltales):
