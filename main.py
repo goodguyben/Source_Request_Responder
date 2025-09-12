@@ -840,14 +840,18 @@ def load_prompt_template() -> str:
         Task:
         - Draft a concise, credible response that demonstrates expertise and relevance.
         - Include a compelling subject line tailored to the query.
-        - Use a polite, professional tone with quick skimmable structure.
+        - Use a polite, professional tone with quick skimmable structure (short paragraphs; no bullets or bold).
         - Provide 2-4 specific, insightful points tied to the query.
         - Proof: include one proof point (metric, brief case note) tied to Mavericks Edge/Bezal when relevant.
         - Plain text: no attachments; max one link only if essential.
         - Close with a direct follow-up invitation (email only).
-        - Keep to 150-250 words in the body unless complexity requires more.
+        - Keep to 150-250 words in the body unless complexity requires more. No more than 2 paragraphs.
         - Keep JSON schema strict: subject, body (no extra keys).
         - Stay within anti-AI style rules (already defined below).
+
+        Hard constraints (do not violate):
+        - Do NOT include a salutation or sign-off/signature; those are inserted by the system.
+        - Do NOT use markdown formatting (no **bold**, lists, or headers). Plain text only.
 
         Style constraints (avoid AI telltales):
         - Vary sentence length; include at least one short punchy line.
@@ -1032,13 +1036,74 @@ def generate_draft_with_gemini(parsed: ParsedRequest) -> Tuple[str, str]:
 
     body = _humanize(body)
 
-    # If body looks like JSON already provided above, keep as-is; else prepend greeting
-    if not body.lstrip().lower().startswith(("dear ", "hello", "hi")):
-        body = f"{greeting}\n\n{body}"
+    # Normalize: strip LLM greeting/signature, enforce plain text 1–2 paragraphs, add closing and fixed signature
+    def _strip_llm_greeting(text: str) -> str:
+        t = text.lstrip()
+        # Remove up to two leading greeting lines like "Hi ...,"/"Hello ..."/"Dear ..."
+        for _ in range(2):
+            m = re.match(r"^(?:hi|hello|hey|dear|greetings)[^\n]*\n+", t, flags=re.IGNORECASE)
+            if not m:
+                break
+            t = t[m.end():]
+        return t.lstrip()
 
+    def _strip_llm_signature(text: str) -> str:
+        t = text.rstrip()
+        # Remove common sign-off blocks starting with regards/sincerely/etc to end
+        signoff = re.search(r"\n\s*(best regards|regards|sincerely|thanks|thank you)[^\n]*$", t, flags=re.IGNORECASE)
+        if signoff:
+            t = t[: signoff.start()] .rstrip()
+        # Heuristic: drop trailing block that looks like a signature (name/title/email/phone)
+        tail = t.splitlines()
+        drop_idx = None
+        for i in range(len(tail) - 1, max(-1, len(tail) - 6), -1):
+            ln = tail[i]
+            if re.search(r"@|\+\d|mavericksedge|founder|bezal", ln, flags=re.IGNORECASE):
+                drop_idx = i
+        if drop_idx is not None:
+            t = "\n".join(tail[:drop_idx]).rstrip()
+        return t
+
+    def _remove_markdown_and_bullets(text: str) -> str:
+        # Remove bold/italics markers
+        t = re.sub(r"(\*\*|__)(.*?)\\1", r"\\2", text)
+        t = re.sub(r"(\*|_)(.*?)\\1", r"\\2", t)
+        # Convert bullets to plain sentences (strip markers)
+        lines = []
+        for ln in t.splitlines():
+            ln2 = re.sub(r"^\s*([\-*•]|\d+\.)\s+", "", ln)
+            lines.append(ln2)
+        t = "\n".join(lines)
+        # Collapse multiple blank lines
+        t = re.sub(r"\n\s*\n+", "\n\n", t)
+        return t.strip()
+
+    def _limit_to_two_paragraphs(text: str) -> str:
+        paras = [p.strip() for p in re.split(r"\n\n+", text) if p.strip()]
+        if not paras:
+            return text.strip()
+        if len(paras) <= 2:
+            return "\n\n".join(paras)
+        # Keep first two; squash the rest into the second
+        merged_second = paras[1] + " " + " ".join(paras[2:])
+        return paras[0] + "\n\n" + re.sub(r"\s+", " ", merged_second).strip()
+
+    body = _strip_llm_greeting(body)
+    body = _strip_llm_signature(body)
+    body = _remove_markdown_and_bullets(body)
+    body = _limit_to_two_paragraphs(body)
+
+    # Prepend our greeting unconditionally
+    body = f"{greeting}\n\n{body}".strip()
+
+    # Ensure proper closing on its own line
+    if not re.search(r"\n\s*Best regards,\s*$", body, flags=re.IGNORECASE):
+        body = body.rstrip() + "\n\nBest regards,"
+
+    # Append standardized signature with URL next to brand (no brackets)
     signature = (
         "\n\nBezal John Benny\n"
-        "Founder | Mavericks Edge (https://mavericksedge.ca/)\n"
+        "Founder | Mavericks Edge — https://mavericksedge.ca/\n"
         "bezal.benny@mavericksedge.ca\n"
         "C: +1 (250) 883-8849"
     )

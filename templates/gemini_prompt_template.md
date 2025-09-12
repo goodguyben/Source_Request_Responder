@@ -25,14 +25,18 @@ Input:
 Task:
 - Draft a concise, credible response that demonstrates expertise and relevance.
 - Include a compelling subject line tailored to the query.
-- Use a polite, professional tone with skimmable structure (short paragraphs, bullets).
+- Use a polite, professional tone with skimmable structure (short paragraphs; no bullets or bold).
 - Provide 2-4 specific, insightful points tightly tied to the query.
 - Proof: include one proof point (metric, brief case note) tied to Mavericks Edge/Bezal when relevant.
 - Plain text: no attachments; max one link only if essential.
 - Close with a direct follow-up invitation (email only).
-- Keep body to ~150-250 words unless complexity requires more.
+- Keep body to ~150-250 words unless complexity requires more. No more than 2 paragraphs.
 - Keep JSON schema strict: subject, body (no extra keys).
 - Stay within anti-AI style rules (already defined below).
+
+Hard constraints (do not violate):
+- Do NOT include a salutation or sign-off/signature; those are inserted by the system.
+- Do NOT use markdown formatting (no **bold**, lists, or headers). Plain text only.
 
 Style constraints (avoid AI telltales):
 - Vary sentence length; include at least one short punchy line.
