@@ -888,6 +888,88 @@ def generate_draft_with_gemini(parsed: ParsedRequest) -> Tuple[str, str]:
     first_name = (parsed.requester_name or "").split()[0] if (parsed.requester_name or "").strip() else None
     greeting = f"Hello {first_name}!" if first_name else "Hello!"
 
+    # Post-process to humanize style and avoid AI telltales
+    def _humanize(text: str) -> str:
+        original = text
+        # Replace formulaic openers and stock phrases
+        replacements = {
+            r"\bIn today's (?:fast-paced|ever[- ]changing) world\b": "",
+            r"\bIt's no secret that\b": "",
+            r"\bAt the end of the day\b": "",
+            r"\bUltimately,\b": "",
+            r"\bIn conclusion,\b": "",
+            r"\bAdditionally,\b": "",
+            r"\bMoreover,\b": "",
+            r"\bOn the other hand,\b": "",
+            r"\bIt is important to note that\b": "",
+        }
+        for pat, rep in replacements.items():
+            text = re.sub(pat, rep, text, flags=re.IGNORECASE)
+
+        # Limit em dashes: replace excessive — with commas/parentheses
+        if text.count("—") > 1:
+            text = text.replace("—", "—", 1)
+            text = text.replace("—", ",")
+
+        # Vary bullets: trim to 2-4 uneven bullets and vary lengths
+        lines = text.splitlines()
+        in_bullets = False
+        bullets: list[str] = []
+        start_idx = -1
+        for i, ln in enumerate(lines):
+            if re.match(r"^\s*[-*] ", ln):
+                if not in_bullets:
+                    in_bullets = True
+                    start_idx = i
+                bullets.append(ln)
+            else:
+                if in_bullets:
+                    # process block
+                    processed = bullets[:]
+                    if len(processed) > 4:
+                        processed = processed[:3]
+                    # jitter: append ellipsis on one, shorten another
+                    if processed:
+                        processed[0] = re.sub(r"\.?$", ".", processed[0])
+                    if len(processed) >= 2:
+                        processed[1] = re.sub(r"\.?$", "…", processed[1])
+                    lines[start_idx:i] = processed
+                    # reset
+                    bullets = []
+                    in_bullets = False
+            
+        if in_bullets:
+            processed = bullets[:]
+            if len(processed) > 4:
+                processed = processed[:3]
+            if processed:
+                processed[0] = re.sub(r"\.?$", ".", processed[0])
+            if len(processed) >= 2:
+                processed[1] = re.sub(r"\.?$", "…", processed[1])
+            lines[start_idx:] = processed
+
+        text = "\n".join(lines)
+
+        # Encourage contractions
+        text = re.sub(r"\bdo not\b", "don't", text, flags=re.IGNORECASE)
+        text = re.sub(r"\bis not\b", "isn't", text, flags=re.IGNORECASE)
+        text = re.sub(r"\bwe are\b", "we're", text, flags=re.IGNORECASE)
+        text = re.sub(r"\bit is\b", "it's", text, flags=re.IGNORECASE)
+
+        # Insert one short punchy sentence near the top if too uniform
+        sentences = re.split(r"(?<=[.!?])\s+", text)
+        if 2 <= len(sentences) <= 8:
+            avg = sum(len(s) for s in sentences) / max(1, len(sentences))
+            if all(10 < len(s) < 220 for s in sentences) and avg > 80:
+                sentences.insert(1, "Quick take: here’s the gist.")
+                text = " ".join(s.strip() for s in sentences)
+
+        # Remove overly polished endings
+        text = re.sub(r"\n*(In conclusion|Ultimately)[^\n]*$", "", text, flags=re.IGNORECASE)
+        return text.strip() or original
+
+    body = _humanize(body)
+
     # If body looks like JSON already provided above, keep as-is; else prepend greeting
     if not body.lstrip().lower().startswith(("dear ", "hello", "hi")):
         body = f"{greeting}\n\n{body}"
