@@ -25,6 +25,7 @@ import email.policy
 import json
 import logging
 import os
+import random
 import re
 import signal
 import sqlite3
@@ -886,7 +887,12 @@ def generate_draft_with_gemini(parsed: ParsedRequest) -> Tuple[str, str]:
 
     # Ensure greeting personalization and required signature
     first_name = (parsed.requester_name or "").split()[0] if (parsed.requester_name or "").strip() else None
-    greeting = f"Hello {first_name}!" if first_name else "Hello!"
+    if first_name:
+        greeting_options = [f"Hello {first_name}!", f"Hi {first_name},"]
+        greeting = random.choice(greeting_options)
+    else:
+        greeting_options = ["Hello!", "Hi there!"]
+        greeting = random.choice(greeting_options)
 
     # Post-process to humanize style and avoid AI telltales
     def _humanize(text: str) -> str:
