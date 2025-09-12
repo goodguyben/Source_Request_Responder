@@ -23,6 +23,7 @@ import datetime as dt
 import email
 import email.policy
 import json
+import html as html_lib
 import random
 import logging
 import os
@@ -1375,7 +1376,36 @@ def build_reply_message(
         msg["In-Reply-To"] = in_reply_to
     if references:
         msg["References"] = references
+    # Plain text part
     msg.set_content(body)
+
+    # HTML alternative with hyperlinked brand in signature
+    def _render_html_email_from_text(text: str) -> str:
+        # Remove URL from the signature line and hyperlink brand name instead
+        text = re.sub(
+            r"Founder\s*\|\s*Mavericks Edge\s*[—-]\s*https?://mavericksedge\.ca/?",
+            "Founder | Mavericks Edge",
+            text,
+            flags=re.IGNORECASE,
+        )
+        # Split paragraphs on blank lines
+        paragraphs = [p.strip() for p in re.split(r"\n\n+", text) if p.strip()]
+        html_parts: list[str] = []
+        for p in paragraphs:
+            esc = html_lib.escape(p)
+            # Linkify brand in signature line
+            esc = re.sub(
+                r"Founder\s*\|\s*Mavericks Edge",
+                "Founder | <a href=\"https://mavericksedge.ca/\">Mavericks Edge</a>",
+                esc,
+            )
+            # Preserve single newlines inside a paragraph
+            esc = esc.replace("\n", "<br>")
+            html_parts.append(f"<p>{esc}</p>")
+        return "\n".join(html_parts) or f"<p>{html_lib.escape(text)}</p>"
+
+    html_body = _render_html_email_from_text(body)
+    msg.add_alternative(html_body, subtype="html")
     return msg
 
 
