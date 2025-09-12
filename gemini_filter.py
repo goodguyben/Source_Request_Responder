@@ -167,7 +167,7 @@ def should_include_query_gemini(query_text: str, summary: str = "", category: st
     is_relevant = (
         analysis["relevant"] and 
         analysis["relevance_score"] >= GEMINI_FILTER_THRESHOLD and
-        analysis["confidence"] >= 0.5
+        analysis["confidence"] >= 0.6
     )
     
     return is_relevant, analysis
