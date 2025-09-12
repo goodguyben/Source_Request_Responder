@@ -27,9 +27,12 @@ Task:
 - Include a compelling subject line tailored to the query.
 - Use a polite, professional tone with skimmable structure (short paragraphs, bullets).
 - Provide 2-4 specific, insightful points tightly tied to the query.
-- Add 1-2 proof points (metrics, brief creds, case study references) where appropriate.
-- Offer availability for follow-up.
+- Proof: include one proof point (metric, brief case note) tied to Mavericks Edge/Bezal when relevant.
+- Plain text: no attachments; max one link only if essential.
+- Close with a direct follow-up invitation (email only).
 - Keep body to ~150-250 words unless complexity requires more.
+- Keep JSON schema strict: subject, body (no extra keys).
+- Stay within anti-AI style rules (already defined below).
 
 Style constraints (avoid AI telltales):
 - Vary sentence length; include at least one short punchy line.
