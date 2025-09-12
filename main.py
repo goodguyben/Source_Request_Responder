@@ -89,7 +89,7 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 # Draft generation provider configuration
 DRAFT_LLM_PROVIDER = os.getenv("DRAFT_LLM_PROVIDER", "gemini").lower()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-GPT5_MODEL = os.getenv("GPT5_MODEL", "gpt-5")
+GPT5_MODEL = os.getenv("GPT5_MODEL", "gpt-5-mini")
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = int(os.getenv("TELEGRAM_CHAT_ID", "0") or "0")
