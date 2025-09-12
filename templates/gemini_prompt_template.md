@@ -10,6 +10,10 @@ Input:
 {{query_text}}
 ---
 
+Context (about us — use briefly and only if relevant to the query):
+- Mavericks Edge is a consulting firm (Edmonton, founded 2017) helping solopreneurs, SMBs, nonprofits, and early-stage orgs by blending human-centered consulting with AI and automation. We build custom web apps, immersive 3D sites, and ecommerce platforms focused on measurable results (sales, engagement). Full-service digital marketing (SEO, PPC, social). Technology-forward: AI across chatbots and workflow automation to cut costs and free teams. We create adaptive digital ecosystems that learn and improve over time, with scalable, future-ready solutions from concept to long-term support.
+- Bezal John Benny (founder) works at the intersection of creativity and technology (BSc Music Technology, MSc UVic). 10+ years turning ideas into reality across complex technical installs and AI-driven web design/automation for mission-driven orgs. Philosophy: tech should amplify people; start with the client’s story, then design authentic, effective systems.
+
 Task:
 - Draft a concise, credible response that demonstrates expertise and relevance.
 - Include a compelling subject line tailored to the query.
@@ -18,6 +22,7 @@ Task:
 - Add 1-2 proof points (metrics, brief creds, case study references) where appropriate.
 - Offer availability for a short call or follow-up.
 - Keep body to ~150-250 words unless complexity requires more.
+- When helpful, weave in 1 short, concrete credibility cue from the Context (e.g., “AI-driven web apps,” “workflow automation,” “SEO + PPC results”), but avoid salesy language.
 
 Style constraints (avoid AI telltales):
 - Vary sentence length; include at least one short punchy line.
