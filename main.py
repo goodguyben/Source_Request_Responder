@@ -906,6 +906,33 @@ def generate_draft_with_gemini(parsed: ParsedRequest) -> Tuple[str, str]:
         for pat, rep in replacements.items():
             text = re.sub(pat, rep, text, flags=re.IGNORECASE)
 
+        # Tone down over-enthusiastic adjectives unless part of a quote
+        exuberant = [
+            "incredible", "transformative", "exciting", "revolutionary", "game-changing",
+            "unprecedented", "amazing", "remarkable", "cutting-edge",
+        ]
+        for w in exuberant:
+            text = re.sub(rf"(?<![\"'])\b{w}\b(?![\"'])", "strong", text, flags=re.IGNORECASE)
+
+        # Reduce brand-name clichés if not present in the query
+        big_brands = ["Tesla", "Apple", "Google", "Amazon", "Microsoft"]
+        for b in big_brands:
+            if b.lower() not in (parsed.query_text or "").lower():
+                text = re.sub(rf"\b{re.escape(b)}\b", "a well-known player", text)
+
+        # Remove near-duplicate consecutive sentences to fight restating
+        sentences = re.split(r"(?<=[.!?])\s+", text)
+        dedup: list[str] = []
+        seen = set()
+        for s in sentences:
+            key = re.sub(r"\W+", " ", s.strip().lower())
+            key = " ".join(key.split())
+            if len(key) > 0 and key not in seen:
+                dedup.append(s)
+                seen.add(key)
+        if len(dedup) >= 2:
+            text = " ".join(dedup)
+
         # Limit em dashes: replace excessive — with commas/parentheses
         if text.count("—") > 1:
             text = text.replace("—", "—", 1)

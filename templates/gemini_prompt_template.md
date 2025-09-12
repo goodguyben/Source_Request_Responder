@@ -28,5 +28,9 @@ Style constraints (avoid AI telltales):
 - Keep bullets uneven (2–4 items max) and concise; no subheadings.
 - Prefer contractions (it's, we're, don't) where natural.
 - Avoid predictable closers (no "In conclusion"/"Ultimately"). End plainly.
+- Avoid over-enthusiastic adjectives (e.g., incredible, transformative, exciting) unless directly quoted.
+- Use specific, non-generic examples; skip default big-tech examples unless the query mentions them.
+- Allow a light, opinionated stance when appropriate (e.g., "this trade-off hurts small teams").
+- Avoid repeating the same idea in different words; remove restatements.
 
 Output JSON exactly with keys: subject, body
