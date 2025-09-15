@@ -784,32 +784,42 @@ def upsert_request(parsed: ParsedRequest) -> int:
         )
         return request_id
     else:
-        db_execute(
-            """
-            INSERT INTO requests (
-                gmail_message_id, gmail_thread_id, subject, sender, sender_email, reply_to, received_at,
-                deadline, requirements, query_text, status, original_headers, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                parsed.gmail_message_id,
-                parsed.gmail_thread_id,
-                parsed.subject,
-                parsed.sender,
-                parsed.sender_email,
-                parsed.reply_to,
-                parsed.received_at,
-                parsed.deadline,
-                parsed.requirements,
-                parsed.query_text,
-                "new",
-                json.dumps(parsed.original_headers),
-                now,
-                now,
-            ),
-        )
-        row = db_query_one("SELECT last_insert_rowid() AS id")
-        return int(row["id"])  # type: ignore[index]
+        with _db_lock:
+            conn = get_db_connection()
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    """
+                    INSERT INTO requests (
+                        gmail_message_id, gmail_thread_id, subject, sender, sender_email, reply_to, received_at,
+                        deadline, requirements, query_text, status, original_headers, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        parsed.gmail_message_id,
+                        parsed.gmail_thread_id,
+                        parsed.subject,
+                        parsed.sender,
+                        parsed.sender_email,
+                        parsed.reply_to,
+                        parsed.received_at,
+                        parsed.deadline,
+                        parsed.requirements,
+                        parsed.query_text,
+                        "new",
+                        json.dumps(parsed.original_headers),
+                        now,
+                        now,
+                    ),
+                )
+                request_id = cur.lastrowid
+                conn.commit()
+                logger.info("upsert_request: Created new request with ID %d for gmail_message_id %s", request_id, parsed.gmail_message_id)
+                if request_id == 0:
+                    logger.error("upsert_request: lastrowid returned 0! This indicates a database issue.")
+                return request_id
+            finally:
+                conn.close()
 
 
 # ------------------------------
@@ -1465,22 +1475,35 @@ def generate_draft(parsed: ParsedRequest) -> Tuple[str, str, str]:
 
 
 def save_draft(request_id: int, subject: str, body: str, model_used: str) -> int:
+    logger.info("save_draft: Saving draft for request_id %d", request_id)
+    if request_id == 0:
+        logger.error("save_draft: request_id is 0! This will cause database issues.")
     now = dt.datetime.now(dt.timezone.utc).isoformat()
-    db_execute(
-        """
-        INSERT INTO drafts (request_id, subject, body, model, approved, created_at, updated_at)
-        VALUES (?, ?, ?, ?, 0, ?, ?)
-        """,
-        (request_id, subject, body, model_used, now, now),
-    )
-    row = db_query_one("SELECT last_insert_rowid() AS id")
-    draft_id = int(row["id"])  # type: ignore[index]
-    db_execute(
-        "UPDATE requests SET status=?, updated_at=? WHERE id=?",
-        ("drafted", now, request_id),
-    )
+    
+    with _db_lock:
+        conn = get_db_connection()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO drafts (request_id, subject, body, model, approved, created_at, updated_at)
+                VALUES (?, ?, ?, ?, 0, ?, ?)
+                """,
+                (request_id, subject, body, model_used, now, now),
+            )
+            draft_id = cur.lastrowid
+            cur.execute(
+                "UPDATE requests SET status=?, updated_at=? WHERE id=?",
+                ("drafted", now, request_id),
+            )
+            conn.commit()
+            logger.info("save_draft: Created draft with ID %d for request_id %d", draft_id, request_id)
+            return draft_id
+        finally:
+            conn.close()
+    
+    # Log action outside of database transaction to avoid potential deadlocks
     log_action(request_id, "draft_created", json.dumps({"draft_id": draft_id}))
-    return draft_id
 
 
 # ------------------------------
@@ -1543,6 +1566,9 @@ def review_keyboard(request_id: int) -> InlineKeyboardMarkup:
 async def telegram_send_review(
     app, parsed: ParsedRequest, request_id: int, subject: str, body: str
 ) -> Optional[int]:
+    logger.info("telegram_send_review: Sending review for request_id %d", request_id)
+    if request_id == 0:
+        logger.error("telegram_send_review: request_id is 0! This will cause database issues.")
     try:
         # 1) Send full query first to guarantee visibility
         query_text = build_query_only_message_text(parsed)
@@ -1609,8 +1635,34 @@ async def handle_approve(update: Update, context: ContextTypes.DEFAULT_TYPE, req
         "SELECT * FROM drafts WHERE request_id=? ORDER BY id DESC LIMIT 1", (request_id,)
     )
     if not req or not draft:
-        await update.effective_message.reply_text("Draft not found.")
-        return
+        # Fallback: derive request_id from the pressed Telegram message
+        msg_id: Optional[int] = None
+        try:
+            if update.callback_query and update.callback_query.message:
+                msg_id = int(update.callback_query.message.message_id)
+        except Exception:
+            msg_id = None
+
+        if msg_id is not None:
+            row = db_query_one(
+                "SELECT request_id FROM telegram_messages WHERE message_id=?", (msg_id,)
+            )
+            if row:
+                try:
+                    request_id = int(row["request_id"])  # type: ignore[index]
+                except Exception:
+                    pass
+                req = db_query_one("SELECT * FROM requests WHERE id=?", (request_id,))
+                draft = db_query_one(
+                    "SELECT * FROM drafts WHERE request_id=? ORDER BY id DESC LIMIT 1",
+                    (request_id,)
+                )
+
+        if not req or not draft:
+            await update.effective_message.reply_text(
+                "Draft not found. This review message may be from a previous session or the database was reset. Please use the newest review message that the bot just sent."
+            )
+            return
 
     try:
         service = await asyncio.to_thread(get_gmail_service)
@@ -1785,7 +1837,7 @@ def send_email_reply(
     body: str,
 ) -> None:
     headers = json.loads(req_row["original_headers"]) if req_row["original_headers"] else {}
-    to_addr = headers.get("Reply-To") or headers.get("From")
+    to_addr = req_row["reply_to"]
     if not to_addr:
         raise RuntimeError("No reply address found")
 
@@ -1855,10 +1907,18 @@ async def poll_gmail_and_process(app) -> None:
                     request_id = upsert_request(parsed)
                     log_action(request_id, "request_parsed", parsed.subject)
                     # Generate draft
+                    logger.info("About to generate draft for request_id %d", request_id)
                     subject, body, model_used = await asyncio.to_thread(generate_draft, parsed)
+                    logger.info("Generated draft for request_id %d, about to save", request_id)
                     save_draft(request_id, subject, body, model_used)
+                    logger.info("Saved draft for request_id %d, about to send to Telegram", request_id)
                     # Send to Telegram for review
-                    await telegram_send_review(app, parsed, request_id, subject, body)
+                    logger.info("About to call telegram_send_review for request_id %d", request_id)
+                    try:
+                        await telegram_send_review(app, parsed, request_id, subject, body)
+                        logger.info("Successfully called telegram_send_review for request_id %d", request_id)
+                    except Exception as e:
+                        logger.exception("Failed to call telegram_send_review for request_id %d: %s", request_id, e)
                 
                 # Mark email as read after processing all queries in it
                 await asyncio.to_thread(gmail_mark_as_read, service, mid)
