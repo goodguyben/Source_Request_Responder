@@ -280,7 +280,7 @@ def db_query_all(query: str, params: Tuple[Any, ...] = ()) -> List[sqlite3.Row]:
 def log_action(request_id: int, action: str, details: str = "") -> None:
     db_execute(
         "INSERT INTO actions_log (request_id, action, details, created_at) VALUES (?, ?, ?, ?)",
-        (request_id, action, details, dt.datetime.utcnow().isoformat()),
+        (request_id, action, details, dt.datetime.now(dt.timezone.utc).isoformat()),
     )
 
 
@@ -596,16 +596,23 @@ def _parse_help_b2b_writer(body_text: str) -> Dict[str, Optional[str]]:
     writer = find_one("Writer")
     publication = find_one("Publication")
     deadline = find_one("Deadline")
-    # Writer's Request block
-    req_match = re.search(r"Writer's Request:\s*(.+?)(?:\n\nDeadline:|\Z)", body_text, re.IGNORECASE | re.DOTALL)
+    industries = find_one("Industries")
+    
+    # Writer's Request block - updated pattern to handle the new format
+    req_match = re.search(r"Writer's Request:\s*(.+?)(?:\n\nDeadline:|\nDeadline:|\Z)", body_text, re.IGNORECASE | re.DOTALL)
     request_text = req_match.group(1).strip() if req_match else body_text
-    # Reply email
-    em = re.search(r"email the writer\s*:\s*(\S+@helpab2bwriter\.com)", body_text, re.IGNORECASE)
+    
+    # Reply email - updated pattern to handle the new format
+    em = re.search(r"To submit a quote, please email the writer:\s*(\S+@helpab2bwriter\.com)", body_text, re.IGNORECASE)
+    if not em:
+        # Fallback to the old pattern
+        em = re.search(r"email the writer\s*:\s*(\S+@helpab2bwriter\.com)", body_text, re.IGNORECASE)
     reply_email = em.group(1).strip() if em else ""
+    
     return {
         "summary": title or "",
         "name": writer or "",
-        "category": find_one("Industries") or "",
+        "category": industries or "",
         "email": reply_email,
         "media_outlet": publication or "",
         "deadline": deadline or "",
@@ -631,7 +638,7 @@ def parse_email_to_requests(msg: Dict[str, Any]) -> List[ParsedRequest]:
             received_dt = email.utils.parsedate_to_datetime(date_header)
             received_at = received_dt.isoformat()
     except Exception:
-        received_at = dt.datetime.utcnow().isoformat()
+        received_at = dt.datetime.now(dt.timezone.utc).isoformat()
 
     text_body, html_body = decode_email_body(payload)
     body_text = text_body.strip() or html_to_text(html_body)
@@ -719,6 +726,7 @@ def parse_email_to_requests(msg: Dict[str, Any]) -> List[ParsedRequest]:
             media_outlet=it.get("media_outlet") or None,
             provider="HELP_A_B2B_WRITER",
             query_index=1,
+            requester_name=it.get("name") or None,
         )
         return [pr2]
 
@@ -749,7 +757,7 @@ def upsert_request(parsed: ParsedRequest) -> int:
     existing = db_query_one(
         "SELECT id FROM requests WHERE gmail_message_id = ?", (parsed.gmail_message_id,)
     )
-    now = dt.datetime.utcnow().isoformat()
+    now = dt.datetime.now(dt.timezone.utc).isoformat()
     if existing:
         request_id = int(existing["id"])
         db_execute(
@@ -836,6 +844,7 @@ def load_prompt_template() -> str:
         Input:
         - Request subject: {{subject}}
         - Request sender: {{sender}} <{{sender_email}}>
+        - Recipient first name (if known): {{first_name}}
         - Deadline (if any): {{deadline}}
         - Requirements (if any): {{requirements}}
         - Full request text:
@@ -856,9 +865,15 @@ def load_prompt_template() -> str:
         - Stay within anti-AI style rules (already defined below).
 
         Hard constraints (do not violate):
-        - Do NOT include a salutation or sign-off/signature; those are inserted by the system.
         - Do NOT use markdown formatting (no **bold**, lists, or headers). Plain text only.
-        - Body must be exactly 2 paragraphs.
+        - Body must be exactly 2 paragraphs between greeting and closing.
+        - MUST include a personalized greeting (e.g., "Hi [Name]!" or "Hello [Name],")
+        - MUST include "Best regards," before the signature.
+        - MUST end with this exact signature:
+          Bezal John Benny
+          Founder | Mavericks Edge
+          bezal.benny@mavericksedge.ca
+          C: +1 (250) 883-8849
 
         Style constraints (avoid AI telltales):
         - Vary sentence length; include at least one short punchy line.
@@ -893,6 +908,13 @@ def generate_draft_with_gemini(parsed: ParsedRequest) -> Tuple[str, str]:
     genai.configure(api_key=GEMINI_API_KEY)
     model = genai.GenerativeModel(GEMINI_MODEL)
 
+    # Derive recipient first name from requester_name or sender
+    first_name = ""
+    if (parsed.requester_name or "").strip():
+        first_name = (parsed.requester_name or "").strip().split()[0]
+    elif (parsed.sender or "").strip():
+        first_name = (parsed.sender or "").strip().split()[0]
+
     template = load_prompt_template()
     prompt = interpolate_template(
         template,
@@ -900,6 +922,7 @@ def generate_draft_with_gemini(parsed: ParsedRequest) -> Tuple[str, str]:
             "subject": parsed.subject,
             "sender": parsed.sender,
             "sender_email": parsed.sender_email,
+            "first_name": first_name,
             "deadline": parsed.deadline or "",
             "requirements": parsed.requirements or "",
             "query_text": parsed.query_text,
@@ -925,14 +948,7 @@ def generate_draft_with_gemini(parsed: ParsedRequest) -> Tuple[str, str]:
     except Exception:
         pass
 
-    # Ensure greeting personalization and required signature
-    first_name = (parsed.requester_name or "").split()[0] if (parsed.requester_name or "").strip() else None
-    if first_name:
-        greeting_options = [f"Hello {first_name}!", f"Hi {first_name},"]
-        greeting = random.choice(greeting_options)
-    else:
-        greeting_options = ["Hello!", "Hi there!"]
-        greeting = random.choice(greeting_options)
+    # LLM now handles greeting and signature - no system intervention needed
 
     # Post-process to humanize style and avoid AI telltales
     def _humanize(text: str) -> str:
@@ -967,22 +983,30 @@ def generate_draft_with_gemini(parsed: ParsedRequest) -> Tuple[str, str]:
                 text = re.sub(rf"\b{re.escape(b)}\b", "a well-known player", text)
 
         # Remove near-duplicate consecutive sentences to fight restating
-        sentences = re.split(r"(?<=[.!?])\s+", text)
-        dedup: list[str] = []
-        seen = set()
-        for s in sentences:
-            key = re.sub(r"\W+", " ", s.strip().lower())
-            key = " ".join(key.split())
-            if len(key) > 0 and key not in seen:
-                dedup.append(s)
-                seen.add(key)
-        if len(dedup) >= 2:
-            text = " ".join(dedup)
-
-        # Limit em dashes: replace excessive — with commas/parentheses
-        if text.count("—") > 1:
-            text = text.replace("—", "—", 1)
-            text = text.replace("—", ",")
+        # Preserve paragraph structure by splitting on double newlines first
+        paragraphs = text.split('\n\n')
+        processed_paragraphs = []
+        
+        for para in paragraphs:
+            sentences = re.split(r"(?<=[.!?])\s+", para)
+            dedup: list[str] = []
+            seen = set()
+            for s in sentences:
+                key = re.sub(r"\W+", " ", s.strip().lower())
+                key = " ".join(key.split())
+                if len(key) > 0 and key not in seen:
+                    dedup.append(s)
+                    seen.add(key)
+            if len(dedup) >= 2:
+                processed_paragraphs.append(" ".join(dedup))
+            else:
+                processed_paragraphs.append(para)
+        
+        text = "\n\n".join(processed_paragraphs)
+        
+        # Remove ALL em dashes - replace with "to" for ranges or commas for pauses
+        text = re.sub(r'(\d+)—(\d+)', r'\1 to \2', text)  # Replace number ranges like "6—12" with "6 to 12"
+        text = text.replace("—", ", ")  # Replace remaining em dashes with commas
 
         # Vary bullets: trim to 2-4 uneven bullets and vary lengths
         lines = text.splitlines()
@@ -1059,17 +1083,28 @@ def generate_draft_with_gemini(parsed: ParsedRequest) -> Tuple[str, str]:
         # Remove common sign-off blocks starting with regards/sincerely/etc to end
         signoff = re.search(r"\n\s*(best regards|regards|sincerely|thanks|thank you)[^\n]*$", t, flags=re.IGNORECASE)
         if signoff:
-            t = t[: signoff.start()] .rstrip()
-        # Heuristic: drop trailing block that looks like a signature (name/title/email/phone)
+            t = t[: signoff.start()].rstrip()
+        # Drop only clearly signature-like trailing lines without nuking body
         tail = t.splitlines()
-        drop_idx = None
-        for i in range(len(tail) - 1, max(-1, len(tail) - 6), -1):
-            ln = tail[i]
-            if re.search(r"@|\+\d|mavericksedge|founder|bezal", ln, flags=re.IGNORECASE):
-                drop_idx = i
-        if drop_idx is not None:
-            t = "\n".join(tail[:drop_idx]).rstrip()
-        return t
+        def is_signature_line(ln: str) -> bool:
+            markers = 0
+            if re.search(r"@|mailto:", ln, flags=re.IGNORECASE):
+                markers += 1
+            if re.search(r"\+\d|\(\d{3}\)", ln):
+                markers += 1
+            if re.search(r"mavericksedge|founder|bezal", ln, flags=re.IGNORECASE):
+                markers += 1
+            # Very short non-sentence lines are often signature lines
+            if len(ln.strip()) <= 60 and not re.search(r"[.!?]\s*$", ln):
+                markers += 0
+            return markers >= 2
+        i = len(tail) - 1
+        while i >= 0 and is_signature_line(tail[i]):
+            i -= 1
+        # Do not drop the only line of content
+        if i < 0:
+            return t
+        return "\n".join(tail[: i + 1]).rstrip()
 
     def _remove_markdown_and_bullets(text: str) -> str:
         # Remove bold/italics markers
@@ -1104,27 +1139,8 @@ def generate_draft_with_gemini(parsed: ParsedRequest) -> Tuple[str, str]:
         merged_second = paras[1] + " " + " ".join(paras[2:])
         return paras[0] + "\n\n" + re.sub(r"\s+", " ", merged_second).strip()
 
-    body = _strip_llm_greeting(body)
-    body = _strip_llm_signature(body)
-    body = _remove_markdown_and_bullets(body)
-    body = _limit_to_two_paragraphs(body)
-
-    # Prepend our greeting unconditionally
-    body = f"{greeting}\n\n{body}".strip()
-
-    # Ensure proper closing on its own line
-    if not re.search(r"\n\s*Best regards,\s*$", body, flags=re.IGNORECASE):
-        body = body.rstrip() + "\n\nBest regards,"
-
-    # Append standardized signature with URL next to brand (no brackets)
-    signature = (
-        "\n\nBezal John Benny\n"
-        "Founder | Mavericks Edge — https://mavericksedge.ca/\n"
-        "bezal.benny@mavericksedge.ca\n"
-        "C: +1 (250) 883-8849"
-    )
-    if signature.strip() not in body:
-        body = body.rstrip() + signature
+    # Preserve LLM formatting verbatim (no post-processing)
+    body = body
 
     return subj.strip(), body.strip()
 
@@ -1141,6 +1157,13 @@ def generate_draft_with_gpt5(parsed: ParsedRequest) -> Tuple[str, str]:
 
     client = OpenAI(api_key=OPENAI_API_KEY)
 
+    # Derive recipient first name from requester_name or sender
+    first_name = ""
+    if (parsed.requester_name or "").strip():
+        first_name = (parsed.requester_name or "").strip().split()[0]
+    elif (parsed.sender or "").strip():
+        first_name = (parsed.sender or "").strip().split()[0]
+
     template = load_prompt_template()
     prompt = interpolate_template(
         template,
@@ -1148,6 +1171,7 @@ def generate_draft_with_gpt5(parsed: ParsedRequest) -> Tuple[str, str]:
             "subject": parsed.subject,
             "sender": parsed.sender,
             "sender_email": parsed.sender_email,
+            "first_name": first_name,
             "deadline": parsed.deadline or "",
             "requirements": parsed.requirements or "",
             "query_text": parsed.query_text,
@@ -1155,24 +1179,90 @@ def generate_draft_with_gpt5(parsed: ParsedRequest) -> Tuple[str, str]:
     )
 
     logger.info("Generating draft with GPT-5 model=%s", GPT5_MODEL)
-    # Use Chat Completions for broad compatibility
-    try:
-        resp = client.chat.completions.create(
-            model=GPT5_MODEL,
-            messages=[
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.7,
-        )
-        text = (resp.choices[0].message.content or "").strip()
-    except Exception as e:
-        # Fallback to Responses API if available in environment
+
+    def _extract_text_from_responses(resp_obj: Any) -> str:
+        # Debug: log the response object structure
+        logger.info("Response object type: %s", type(resp_obj))
+        logger.info("Response object attributes: %s", dir(resp_obj))
+        
+        # Try various extraction methods
+        extraction_methods = [
+            lambda: getattr(resp_obj, "output_text", None),
+            lambda: getattr(resp_obj, "text", None),
+            lambda: getattr(resp_obj, "content", None),
+            lambda: getattr(resp_obj, "response", None),
+            lambda: getattr(resp_obj, "output", None),
+        ]
+        
+        for i, method in enumerate(extraction_methods):
+            try:
+                result = method()
+                logger.info("Extraction method %d result: %s", i, result)
+                if isinstance(result, str) and result.strip():
+                    logger.info("Found text via method %d: %s", i, result[:200])
+                    return result.strip()
+            except Exception as e:
+                logger.info("Extraction method %d failed: %s", i, e)
+        
+        # Try content list (SDK variants)
+        content = getattr(resp_obj, "content", None)
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                # item may be an object or dict with 'text'
+                if isinstance(item, dict):
+                    t = item.get("text")
+                    if isinstance(t, str) and t.strip():
+                        parts.append(t.strip())
+                else:
+                    t = getattr(item, "text", None)
+                    if isinstance(t, str) and t.strip():
+                        parts.append(t.strip())
+            if parts:
+                result = "\n".join(parts).strip()
+                logger.info("Found text via content list: %s", result[:200])
+                return result
+        
+        logger.warning("Could not extract text from response object")
+        return ""
+
+    text = ""
+    use_responses_first = GPT5_MODEL.lower().startswith("gpt-5")
+
+    if use_responses_first:
+        # Primary path for GPT-5 family: Responses API
+        resp2 = client.responses.create(model=GPT5_MODEL, input=prompt)
+        text = _extract_text_from_responses(resp2)
+        if not text.strip():
+            # Best-effort secondary attempt via chat.completions
+            try:
+                resp = client.chat.completions.create(
+                    model=GPT5_MODEL,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.7,
+                )
+                text = (resp.choices[0].message.content or "").strip()
+            except Exception:
+                pass
+    else:
+        # Try chat.completions first for non GPT-5 models
         try:
-            resp2 = client.responses.create(model=GPT5_MODEL, input=prompt)
-            # New Responses API returns output in a different structure
-            text = (getattr(resp2, "output_text", None) or getattr(resp2, "content", "") or "").strip()
+            resp = client.chat.completions.create(
+                model=GPT5_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,
+            )
+            text = (resp.choices[0].message.content or "").strip()
         except Exception:
-            raise
+            resp2 = client.responses.create(model=GPT5_MODEL, input=prompt)
+            text = _extract_text_from_responses(resp2)
+
+    logger.info("Extracted text length: %d, content: %s", len(text), text[:200] if text else "None")
+    
+    if not text.strip():
+        logger.warning("No text extracted from GPT-5 response, using fallback")
+        # Ensure we always have some content to display in Telegram
+        text = "{\"subject\": \"Re: %s\", \"body\": \"I'd be happy to provide insights on this topic. Please let me know if you need any additional information.\"}" % parsed.subject
 
     subj = "Re: " + parsed.subject
     body = text
@@ -1187,14 +1277,10 @@ def generate_draft_with_gpt5(parsed: ParsedRequest) -> Tuple[str, str]:
     except Exception:
         pass
 
-    # Ensure greeting personalization and required signature (reuse same post-processing as Gemini)
-    first_name = (parsed.requester_name or "").split()[0] if (parsed.requester_name or "").strip() else None
-    if first_name:
-        greeting_options = [f"Hello {first_name}!", f"Hi {first_name},"]
-        greeting = random.choice(greeting_options)
-    else:
-        greeting_options = ["Hello!", "Hi there!"]
-        greeting = random.choice(greeting_options)
+    # Keep a copy before aggressive cleanup in case we over-trim
+    original_body_from_model = body
+
+    # LLM now handles greeting and signature - no system intervention needed
 
     def _humanize(text: str) -> str:
         original = text
@@ -1228,20 +1314,31 @@ def generate_draft_with_gpt5(parsed: ParsedRequest) -> Tuple[str, str]:
         for b in big_brands:
             if b.lower() not in (parsed.query_text or "").lower():
                 text = re.sub(rf"\b{re.escape(b)}\b", "a well-known player", text)
-        sentences = re.split(r"(?<=[.!?])\s+", text)
-        dedup: list[str] = []
-        seen = set()
-        for s in sentences:
-            key = re.sub(r"\W+", " ", s.strip().lower())
-            key = " ".join(key.split())
-            if len(key) > 0 and key not in seen:
-                dedup.append(s)
-                seen.add(key)
-        if len(dedup) >= 2:
-            text = " ".join(dedup)
-        if text.count("—") > 1:
-            text = text.replace("—", "—", 1)
-            text = text.replace("—", ",")
+        # Remove near-duplicate consecutive sentences to fight restating
+        # Preserve paragraph structure by splitting on double newlines first
+        paragraphs = text.split('\n\n')
+        processed_paragraphs = []
+        
+        for para in paragraphs:
+            sentences = re.split(r"(?<=[.!?])\s+", para)
+            dedup: list[str] = []
+            seen = set()
+            for s in sentences:
+                key = re.sub(r"\W+", " ", s.strip().lower())
+                key = " ".join(key.split())
+                if len(key) > 0 and key not in seen:
+                    dedup.append(s)
+                    seen.add(key)
+            if len(dedup) >= 2:
+                processed_paragraphs.append(" ".join(dedup))
+            else:
+                processed_paragraphs.append(para)
+        
+        text = "\n\n".join(processed_paragraphs)
+        
+        # Remove ALL em dashes - replace with "to" for ranges or commas for pauses
+        text = re.sub(r'(\d+)—(\d+)', r'\1 to \2', text)  # Replace number ranges like "6—12" with "6 to 12"
+        text = text.replace("—", ", ")  # Replace remaining em dashes with commas
         lines = text.splitlines()
         in_bullets = False
         bullets: list[str] = []
@@ -1304,14 +1401,23 @@ def generate_draft_with_gpt5(parsed: ParsedRequest) -> Tuple[str, str]:
         if signoff:
             t = t[: signoff.start()].rstrip()
         tail = t.splitlines()
-        drop_idx = None
-        for i in range(len(tail) - 1, max(-1, len(tail) - 6), -1):
-            ln = tail[i]
-            if re.search(r"@|\+\d|mavericksedge|founder|bezal", ln, flags=re.IGNORECASE):
-                drop_idx = i
-        if drop_idx is not None:
-            t = "\n".join(tail[:drop_idx]).rstrip()
-        return t
+        def is_signature_line(ln: str) -> bool:
+            markers = 0
+            if re.search(r"@|mailto:", ln, flags=re.IGNORECASE):
+                markers += 1
+            if re.search(r"\+\d|\(\d{3}\)", ln):
+                markers += 1
+            if re.search(r"mavericksedge|founder|bezal", ln, flags=re.IGNORECASE):
+                markers += 1
+            if len(ln.strip()) <= 60 and not re.search(r"[.!?]\s*$", ln):
+                markers += 0
+            return markers >= 2
+        i = len(tail) - 1
+        while i >= 0 and is_signature_line(tail[i]):
+            i -= 1
+        if i < 0:
+            return t
+        return "\n".join(tail[: i + 1]).rstrip()
 
     def _remove_markdown_and_bullets(text: str) -> str:
         t = re.sub(r"(\*\*|__)(.*?)\\1", r"\\2", text)
@@ -1341,22 +1447,8 @@ def generate_draft_with_gpt5(parsed: ParsedRequest) -> Tuple[str, str]:
         merged_second = paras[1] + " " + " ".join(paras[2:])
         return paras[0] + "\n\n" + re.sub(r"\s+", " ", merged_second).strip()
 
-    body = _strip_llm_greeting(body)
-    body = _strip_llm_signature(body)
-    body = _remove_markdown_and_bullets(body)
-    body = _limit_to_two_paragraphs(body)
-
-    body = f"{greeting}\n\n{body}".strip()
-    if not re.search(r"\n\s*Best regards,\s*$", body, flags=re.IGNORECASE):
-        body = body.rstrip() + "\n\nBest regards,"
-    signature = (
-        "\n\nBezal John Benny\n"
-        "Founder | Mavericks Edge — https://mavericksedge.ca/\n"
-        "bezal.benny@mavericksedge.ca\n"
-        "C: +1 (250) 883-8849"
-    )
-    if signature.strip() not in body:
-        body = body.rstrip() + signature
+    # Preserve LLM formatting verbatim (no post-processing)
+    body = body
 
     return subj.strip(), body.strip()
 
@@ -1373,7 +1465,7 @@ def generate_draft(parsed: ParsedRequest) -> Tuple[str, str, str]:
 
 
 def save_draft(request_id: int, subject: str, body: str, model_used: str) -> int:
-    now = dt.datetime.utcnow().isoformat()
+    now = dt.datetime.now(dt.timezone.utc).isoformat()
     db_execute(
         """
         INSERT INTO drafts (request_id, subject, body, model, approved, created_at, updated_at)
@@ -1460,6 +1552,11 @@ async def telegram_send_review(
         )
         # 2) Send analysis + proposed draft with inline keyboard
         text2 = build_review_message_text(parsed, subject, body)
+        logger.info(
+            "Telegram draft preview | subj_len=%d body_len=%d text2_len=%d",
+            len(subject or ""), len(body or ""), len(text2 or ""),
+        )
+        logger.info("Telegram body preview: %s", (body or "")[:200])
         sent = await app.bot.send_message(
             chat_id=TELEGRAM_CHAT_ID,
             text=text2,
@@ -1472,12 +1569,12 @@ async def telegram_send_review(
                 request_id,
                 str(TELEGRAM_CHAT_ID),
                 int(sent.message_id),
-                dt.datetime.utcnow().isoformat(),
+                dt.datetime.now(dt.timezone.utc).isoformat(),
             ),
         )
         db_execute(
             "UPDATE requests SET status=?, updated_at=? WHERE id=?",
-            ("pending_review", dt.datetime.utcnow().isoformat(), request_id),
+            ("pending_review", dt.datetime.now(dt.timezone.utc).isoformat(), request_id),
         )
         log_action(request_id, "telegram_review_sent", json.dumps({"message_id": sent.message_id}))
         return int(sent.message_id)
@@ -1524,7 +1621,7 @@ async def handle_approve(update: Update, context: ContextTypes.DEFAULT_TYPE, req
             draft["subject"],
             draft["body"],
         )
-        now = dt.datetime.utcnow().isoformat()
+        now = dt.datetime.now(dt.timezone.utc).isoformat()
         db_execute("UPDATE drafts SET approved=1, updated_at=? WHERE id=?", (now, int(draft["id"])))
         db_execute("UPDATE requests SET status=?, updated_at=? WHERE id=?", ("sent", now, request_id))
         log_action(request_id, "approved_and_sent", "")
@@ -1538,7 +1635,7 @@ async def handle_approve(update: Update, context: ContextTypes.DEFAULT_TYPE, req
 async def handle_reject(update: Update, context: ContextTypes.DEFAULT_TYPE, request_id: int) -> None:
     db_execute(
         "UPDATE requests SET status=?, updated_at=? WHERE id=?",
-        ("rejected", dt.datetime.utcnow().isoformat(), request_id),
+        ("rejected", dt.datetime.now(dt.timezone.utc).isoformat(), request_id),
     )
     log_action(request_id, "rejected", "")
     await update.effective_message.reply_text("❌ Rejected. No reply will be sent.")
@@ -1589,7 +1686,7 @@ async def handle_edit_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     db_execute(
         "UPDATE drafts SET subject=?, body=?, updated_at=? WHERE request_id=?",
-        (subject, body, dt.datetime.utcnow().isoformat(), request_id),
+        (subject, body, dt.datetime.now(dt.timezone.utc).isoformat(), request_id),
     )
     db_execute("DELETE FROM pending_edits WHERE chat_id=? AND request_id=?", (chat_id, request_id))
     req = db_query_one("SELECT * FROM requests WHERE id=?", (request_id,))
@@ -1772,7 +1869,7 @@ async def poll_gmail_and_process(app) -> None:
                 if row:
                     db_execute(
                         "UPDATE requests SET status=?, updated_at=? WHERE id=?",
-                        ("error", dt.datetime.utcnow().isoformat(), int(row["id"])),
+                        ("error", dt.datetime.now(dt.timezone.utc).isoformat(), int(row["id"])),
                     )
     except Exception as e:
         logger.exception("Polling failed: %s", e)
