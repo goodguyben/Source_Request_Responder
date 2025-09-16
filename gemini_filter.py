@@ -17,8 +17,9 @@ logger = logging.getLogger("gemini_filter")
 # Configuration
 USE_GEMINI_FILTERING = os.getenv("USE_GEMINI_FILTERING", "true").lower() == "true"
 GEMINI_FILTER_MODEL = os.getenv("GEMINI_FILTER_MODEL", "gemini-2.5-flash")
-GEMINI_FILTER_THRESHOLD = float(os.getenv("GEMINI_FILTER_THRESHOLD", "0.7"))
+GEMINI_FILTER_THRESHOLD = float(os.getenv("GEMINI_FILTER_THRESHOLD", "0.85"))
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_CONFIDENCE_THRESHOLD = float(os.getenv("GEMINI_CONFIDENCE_THRESHOLD", "0.75"))
 
 # Topic definitions for Gemini analysis
 TOPIC_DEFINITIONS = {
@@ -85,16 +86,17 @@ RESPOND WITH JSON ONLY:
 }}
 
 Guidelines:
-- Be generous with relevance (false positives are better than false negatives)
-- Consider business context and professional expertise
-- Score 0.7+ for clear relevance, 0.5-0.7 for potential relevance
-- Include all applicable topics in matching_topics array
+- Be strict about relevance; prefer precision over recall. If unsure, set relevant=false.
+- Do not infer relevance from generic business language. Require explicit topical signals (direct mentions) or two strong implicit signals.
+- Scoring: 0.85–1.0 = clearly relevant; 0.65–0.84 = borderline; <0.65 = not relevant.
+- Confidence must reflect evidence. Lower confidence when signals are weak, ambiguous, or generic.
+- Only include topics that genuinely match. If none match, use an empty array.
 """
     
     return prompt.strip()
 
 def analyze_query_with_gemini(query_text: str, summary: str = "", category: str = "") -> Dict:
-    """Use Gemini to analyze HARO query relevance."""
+    """Use Gemini to analyze HARO query relevance with automatic fallback."""
     
     if not USE_GEMINI_FILTERING or not GEMINI_API_KEY:
         logger.warning("Gemini filtering disabled or API key missing")
@@ -106,47 +108,60 @@ def analyze_query_with_gemini(query_text: str, summary: str = "", category: str 
             "confidence": 0.0
         }
     
-    try:
-        # Configure Gemini
-        genai.configure(api_key=GEMINI_API_KEY)
-        model = genai.GenerativeModel(GEMINI_FILTER_MODEL)
-        
-        # Create prompt
-        prompt = create_gemini_filter_prompt(query_text, summary, category)
-        
-        logger.info(f"Analyzing query with Gemini: {summary[:100]}...")
-        
-        # Generate response
-        response = model.generate_content(prompt)
-        response_text = response.text.strip()
-        
-        # Parse JSON response
+    # Try primary model first, then fallback to secondary model
+    models_to_try = [GEMINI_FILTER_MODEL, "gemini-1.5-flash"]
+    
+    for model_name in models_to_try:
         try:
-            # Clean up response text (remove markdown formatting if present)
-            if response_text.startswith("```json"):
-                response_text = response_text.replace("```json", "").replace("```", "").strip()
-            elif response_text.startswith("```"):
-                response_text = response_text.replace("```", "").strip()
+            # Configure Gemini
+            genai.configure(api_key=GEMINI_API_KEY)
+            model = genai.GenerativeModel(model_name)
             
-            result = json.loads(response_text)
+            # Create prompt
+            prompt = create_gemini_filter_prompt(query_text, summary, category)
             
-            # Validate response structure
-            required_fields = ["relevant", "relevance_score", "matching_topics", "reasoning", "confidence"]
-            if not all(field in result for field in required_fields):
-                logger.error("Invalid Gemini response structure")
-                return create_fallback_result()
+            logger.info(f"Analyzing query with Gemini ({model_name}): {summary[:100]}...")
             
-            logger.info(f"Gemini analysis: Relevant={result['relevant']}, Score={result['relevance_score']:.2f}, Topics={result['matching_topics']}")
-            return result
+            # Generate response
+            response = model.generate_content(prompt)
+            response_text = response.text.strip()
             
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse Gemini JSON response: {e}")
-            logger.error(f"Raw response: {response_text}")
-            return create_fallback_result()
-            
-    except Exception as e:
-        logger.exception(f"Error in Gemini query analysis: {e}")
-        return create_fallback_result()
+            # Parse JSON response
+            try:
+                # Clean up response text (remove markdown formatting if present)
+                if response_text.startswith("```json"):
+                    response_text = response_text.replace("```json", "").replace("```", "").strip()
+                elif response_text.startswith("```"):
+                    response_text = response_text.replace("```", "").strip()
+                
+                result = json.loads(response_text)
+                
+                # Validate response structure
+                required_fields = ["relevant", "relevance_score", "matching_topics", "reasoning", "confidence"]
+                if not all(field in result for field in required_fields):
+                    logger.error(f"Invalid Gemini response structure from {model_name}")
+                    continue  # Try next model
+                
+                logger.info(f"Gemini analysis ({model_name}): Relevant={result['relevant']}, Score={result['relevance_score']:.2f}, Topics={result['matching_topics']}")
+                return result
+                
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse Gemini JSON response from {model_name}: {e}")
+                logger.error(f"Raw response: {response_text}")
+                continue  # Try next model
+                
+        except Exception as e:
+            error_msg = str(e)
+            if "quota" in error_msg.lower() or "429" in error_msg:
+                logger.warning(f"Quota exceeded for {model_name}, trying fallback model...")
+                continue  # Try next model
+            else:
+                logger.exception(f"Error in Gemini query analysis with {model_name}: {e}")
+                continue  # Try next model
+    
+    # If all models failed
+    logger.error("All Gemini models failed, using fallback result")
+    return create_fallback_result()
 
 def create_fallback_result() -> Dict:
     """Create a fallback result when Gemini analysis fails."""
@@ -164,10 +179,13 @@ def should_include_query_gemini(query_text: str, summary: str = "", category: st
     analysis = analyze_query_with_gemini(query_text, summary, category)
     
     # Decision logic
+    # Require at least one matching topic, higher relevance and confidence
     is_relevant = (
-        analysis["relevant"] and 
-        analysis["relevance_score"] >= GEMINI_FILTER_THRESHOLD and
-        analysis["confidence"] >= 0.6
+        analysis["relevant"]
+        and analysis["relevance_score"] >= GEMINI_FILTER_THRESHOLD
+        and analysis["confidence"] >= GEMINI_CONFIDENCE_THRESHOLD
+        and isinstance(analysis.get("matching_topics"), list)
+        and len(analysis.get("matching_topics")) > 0
     )
     
     return is_relevant, analysis

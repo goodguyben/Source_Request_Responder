@@ -1837,34 +1837,6 @@ def validate_email_address(email: str) -> str:
     if not email:
         raise ValueError("Email address is empty")
     
-    # Clean the email address - remove all whitespace and newlines
-    email = email.strip().replace("\n", "").replace("\r", "").replace(" ", "")
-    
-    # Handle duplicated email addresses (common issue with database storage)
-    # Split by @ and take the first part before @ and last part after @
-    if "@" in email:
-        parts = email.split("@")
-        if len(parts) >= 2:
-            # Take the first part (before first @) and last part (after last @)
-            local_part = parts[0]
-            domain_part = parts[-1]
-            email = f"{local_part}@{domain_part}"
-    
-    # Parse the email address
-    name, addr = parseaddr(email)
-    if not addr:
-        raise ValueError(f"Invalid email address format: {email}")
-    
-    # Basic email validation
-    if "@" not in addr or "." not in addr.split("@")[1]:
-        raise ValueError(f"Invalid email address format: {addr}")
-    
-    # Return just the address part
-    return addr
-    """Validate and clean email address for Gmail API."""
-    if not email:
-        raise ValueError("Email address is empty")
-    
     # Clean the email address
     email = email.strip().replace("\n", "").replace("\r", "")
     

@@ -28,8 +28,6 @@ import random
 import logging
 import os
 import re
-import re
-from email.utils import parseaddr
 import signal
 import sqlite3
 import sys
@@ -1832,54 +1830,6 @@ def build_reply_message(
     return msg
 
 
-def validate_email_address(email: str) -> str:
-    """Validate and clean email address for Gmail API."""
-    if not email:
-        raise ValueError("Email address is empty")
-    
-    # Clean the email address - remove all whitespace and newlines
-    email = email.strip().replace("\n", "").replace("\r", "").replace(" ", "")
-    
-    # Handle duplicated email addresses (common issue with database storage)
-    # Split by @ and take the first part before @ and last part after @
-    if "@" in email:
-        parts = email.split("@")
-        if len(parts) >= 2:
-            # Take the first part (before first @) and last part (after last @)
-            local_part = parts[0]
-            domain_part = parts[-1]
-            email = f"{local_part}@{domain_part}"
-    
-    # Parse the email address
-    name, addr = parseaddr(email)
-    if not addr:
-        raise ValueError(f"Invalid email address format: {email}")
-    
-    # Basic email validation
-    if "@" not in addr or "." not in addr.split("@")[1]:
-        raise ValueError(f"Invalid email address format: {addr}")
-    
-    # Return just the address part
-    return addr
-    """Validate and clean email address for Gmail API."""
-    if not email:
-        raise ValueError("Email address is empty")
-    
-    # Clean the email address
-    email = email.strip().replace("\n", "").replace("\r", "")
-    
-    # Parse the email address
-    name, addr = parseaddr(email)
-    if not addr:
-        raise ValueError(f"Invalid email address format: {email}")
-    
-    # Basic email validation
-    if "@" not in addr or "." not in addr.split("@")[1]:
-        raise ValueError(f"Invalid email address format: {addr}")
-    
-    # Return just the address part
-    return addr
-
 @retry(reraise=True, stop=stop_after_attempt(5), wait=wait_exponential(min=2, max=30))
 def send_email_reply(
     service: Any,
@@ -1888,13 +1838,7 @@ def send_email_reply(
     body: str,
 ) -> None:
     headers = json.loads(req_row["original_headers"]) if req_row["original_headers"] else {}
-    to_addr = validate_email_address(req_row["reply_to"])
-    try:
-        to_addr = validate_email_address(req_row["reply_to"])
-    except ValueError as e:
-        logger.error("Invalid email address for request %d: %s", req_row["id"], e)
-        raise RuntimeError(f"Invalid email address: {e}")
-
+    to_addr = req_row["reply_to"]
     if not to_addr:
         raise RuntimeError("No reply address found")
 
